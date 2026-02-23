@@ -15,9 +15,9 @@ from .download import _get_session
 from .download import download
 from .exceptions import FolderContentsMaximumLimitError
 from .parse_url import is_google_drive_url
+from .progress_store import get_progress, init_progress, set_folder_file_meta, update_folder_file_index, complete_progress
 
 MAX_NUMBER_FILES = 50
-
 
 class _GoogleDriveFile(object):
     TYPE_FOLDER = "application/vnd.google-apps.folder"
@@ -196,7 +196,24 @@ GoogleDriveFileToDownload = collections.namedtuple(
     "GoogleDriveFileToDownload", ("id", "path", "local_path")
 )
 
+def _cleanup_downloaded_files(files):
+    for path in files:
+        try:
+            if os.path.isfile(path):
+                os.remove(path)
+        except Exception:
+            pass
 
+def _check_folder_cancel(task_id, quiet=False, files=None):
+    progress = get_progress(task_id)
+    if progress and progress.get("cancelled"):
+        rtexts = "Folder download cancelled by user"
+        if not quiet:
+            print(f"\n{rtexts}.", file=sys.stderr)
+        if files:
+            _cleanup_downloaded_files(files)
+        raise RuntimeError(rtexts)
+    
 def download_folder(
     url=None,
     id=None,
@@ -204,6 +221,8 @@ def download_folder(
     quiet=False,
     proxy=None,
     speed=None,
+    max_size=None,
+    task_id=None,
     use_cookies=True,
     remaining_ok=False,
     verify=True,
@@ -268,6 +287,9 @@ def download_folder(
         # We need to use different user agent for folder download c.f., file
         user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/98.0.4758.102 Safari/537.36"  # NOQA: E501
 
+    if task_id:
+        init_progress(task_id, 0)
+
     sess = _get_session(proxy=proxy, use_cookies=use_cookies, user_agent=user_agent)
 
     if not quiet:
@@ -299,44 +321,71 @@ def download_folder(
     if not skip_download and not osp.exists(root_dir):
         os.makedirs(root_dir)
 
-    files = []
-    for id, path in directory_structure:
-        local_path = osp.join(root_dir, path)
+    if task_id:
+        total_files = sum(1 for file_id, _ in directory_structure if file_id is not None)
+        set_folder_file_meta(task_id, total_files)
 
-        if id is None:  # folder
-            if not skip_download and not osp.exists(local_path):
-                os.makedirs(local_path)
-            continue
+    try:
+        file_index = 0 
+        files = []
+        for id, path in directory_structure:
+            local_path = osp.join(root_dir, path)
+            if id is not None:
+                file_index += 1
+                if task_id:
+                    update_folder_file_index(task_id, file_index)
 
-        if skip_download:
-            files.append(
-                GoogleDriveFileToDownload(id=id, path=path, local_path=local_path)
-            )
-        else:
-            if resume and os.path.isfile(local_path):
-                if not quiet:
-                    print(
-                        f"Skipping already downloaded file {local_path}",
-                        file=sys.stderr,
-                    )
-                files.append(local_path)
+            if task_id:
+                _check_folder_cancel(task_id, quiet, files)
+
+            if id is None:  # folder
+                if not skip_download and not osp.exists(local_path):
+                    os.makedirs(local_path)
                 continue
 
-            local_path = download(
-                url="https://drive.google.com/uc?id=" + id,
-                output=local_path,
-                quiet=quiet,
-                proxy=proxy,
-                speed=speed,
-                use_cookies=use_cookies,
-                verify=verify,
-                resume=resume,
-            )
-            if local_path is None:
-                if not quiet:
-                    print("Download ended unsuccessfully", file=sys.stderr)
-                return None
-            files.append(local_path)
-    if not quiet:
-        print("Download completed", file=sys.stderr)
+            if skip_download:
+                files.append(
+                    GoogleDriveFileToDownload(id=id, path=path, local_path=local_path)
+                )
+            else:
+                if resume and os.path.isfile(local_path):
+                    if not quiet:
+                        print(
+                            f"Skipping already downloaded file {local_path}",
+                            file=sys.stderr,
+                        )
+                    files.append(local_path)
+                    continue
+
+                try:
+                    local_path = download(
+                        url="https://drive.google.com/uc?id=" + id,
+                        output=local_path,
+                        quiet=quiet,
+                        proxy=proxy,
+                        speed=speed,
+                        max_size=max_size,
+                        task_id=task_id,
+                        use_cookies=use_cookies,
+                        verify=verify,
+                        resume=resume,
+                        from_folder=True,
+                    )
+                except RuntimeError as e:
+                    if "cancelled" in str(e).lower():
+                        _cleanup_downloaded_files(files)
+                    raise
+                    
+                if local_path is None:
+                    if not quiet:
+                        print("Download ended unsuccessfully", file=sys.stderr)
+                    return None
+                files.append(local_path)
+        if not quiet:
+            print("Download completed", file=sys.stderr)
+        if task_id:
+            complete_progress(task_id)
+    finally:
+        if sess:
+            sess.close()
     return files

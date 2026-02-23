@@ -91,6 +91,15 @@ def main():
         help="download speed limit in second (e.g., '10MB' -> 10MB/s)",
     )
     parser.add_argument(
+        "--max-size",
+        type=file_size,
+        help="maximum allowed file size (e.g., 15GB, 500MB). Files larger than this will be rejected.",
+    )
+    parser.add_argument(
+        "--task-id",
+        help="Task ID to track download progress (optional)",
+    )
+    parser.add_argument(
         "--no-cookies",
         action="store_true",
         help="don't use cookies in ~/.cache/gdown/cookies.txt",
@@ -152,6 +161,13 @@ def main():
             url = None
             id = args.url_or_id
 
+    if args.task_id:
+        print(
+            "Note: Progress tracking via --task-id works fully only when using gdown as a Python module.\n"
+            "For real-time progress access, use gdown.download() in Python instead of the CLI.",
+            file=sys.stderr,
+        )
+
     try:
         if args.folder:
             download_folder(
@@ -161,6 +177,7 @@ def main():
                 quiet=args.quiet,
                 proxy=args.proxy,
                 speed=args.speed,
+                max_size=args.max_size,
                 use_cookies=not args.no_cookies,
                 verify=not args.no_check_certificate,
                 remaining_ok=args.remaining_ok,
@@ -174,6 +191,7 @@ def main():
                 quiet=args.quiet,
                 proxy=args.proxy,
                 speed=args.speed,
+                max_size=args.max_size,
                 use_cookies=not args.no_cookies,
                 verify=not args.no_check_certificate,
                 id=id,
@@ -201,6 +219,9 @@ def main():
             ),
             file=sys.stderr,
         )
+        sys.exit(1)
+    except RuntimeError as e:
+        print(e, file=sys.stderr)
         sys.exit(1)
     except Exception as e:
         print(

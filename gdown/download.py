@@ -17,6 +17,14 @@ import tqdm
 from ._indent import indent
 from .exceptions import FileURLRetrievalError
 from .parse_url import parse_url
+from .progress_store import (
+    init_progress,
+    update_progress,
+    complete_progress,
+    fail_progress,
+    folder_update_progress,
+    get_progress,
+)
 
 CHUNK_SIZE = 512 * 1024  # 512KB
 home = osp.expanduser("~")
@@ -109,6 +117,31 @@ def _get_session(proxy, use_cookies, user_agent, return_cookies_file=False):
     else:
         return sess
 
+def _check_cancel(task_id, quiet=False, pbar=None, tmp_file=None, f=None, tag=""):
+    progress = get_progress(task_id)
+    if progress and progress.get("cancelled"):
+        rtexts = "File download cancelled by user"
+        if not quiet:
+            print(f"\n{tag} {rtexts}.", file=sys.stderr)
+            if pbar:
+                pbar.close()
+        if tmp_file and f:
+            f.close()
+            if os.path.exists(tmp_file):
+                os.remove(tmp_file)
+        raise RuntimeError(rtexts)
+    
+def _size_limit_error(total, max_size, from_folder):
+    if from_folder:
+        return (
+            f"A file inside the folder exceeds the maximum allowed size "
+            f"({total / (1024**3):.2f} GB exceeds the per-file limit of "
+            f"{max_size / (1024**3):.2f} GB)."
+        )
+    return (
+        f"The file size ({total / (1024**3):.2f} GB) exceeds the maximum allowed "
+        f"limit of {max_size / (1024**3):.2f} GB."
+    )
 
 def download(
     url=None,
@@ -116,6 +149,8 @@ def download(
     quiet=False,
     proxy=None,
     speed=None,
+    max_size=None,
+    task_id=None,
     use_cookies=True,
     verify=True,
     id=None,
@@ -124,6 +159,7 @@ def download(
     format=None,
     user_agent=None,
     log_messages=None,
+    from_folder=False,
 ):
     """Download file from URL.
 
@@ -182,6 +218,11 @@ def download(
         log_messages = {}
 
     url_origin = url
+    if task_id:
+        if from_folder:
+            folder_update_progress(task_id, 0)
+        else:
+            init_progress(task_id, 0)
 
     sess, cookies_file = _get_session(
         proxy=proxy,
@@ -288,6 +329,9 @@ def download(
     if output is None:
         output = filename_from_url
 
+    if task_id:
+        _check_cancel(task_id, quiet, tag="[1]")
+
     output_is_path = isinstance(output, str)
     if output_is_path and output.endswith(osp.sep):
         if not osp.exists(output):
@@ -357,18 +401,45 @@ def download(
             file=sys.stderr,
             end="",
         )
-
     try:
         total = res.headers.get("Content-Length")
         if total is not None:
             total = int(total) + start_size
+        if max_size is not None and total is not None:
+            if total > max_size:
+                if tmp_file is not None:
+                    f.close()
+                    if os.path.exists(tmp_file):
+                        os.remove(tmp_file)
+                limit_err = _size_limit_error(total, max_size, from_folder)
+                if task_id:
+                    fail_progress(task_id, limit_err)
+                raise ValueError(limit_err)
+
+        pbar = None
         if not quiet:
             pbar = tqdm.tqdm(total=total, unit="B", initial=start_size, unit_scale=True)
         t_start = time.time()
         downloaded = 0
         for chunk in res.iter_content(chunk_size=CHUNK_SIZE):
+            if max_size is not None:
+                if (start_size + downloaded + len(chunk)) > max_size:
+                    if tmp_file is not None:
+                        f.close()
+                        if os.path.exists(tmp_file):
+                            os.remove(tmp_file)
+                    limit_err = _size_limit_error(total, max_size, from_folder)
+                    if task_id:
+                        fail_progress(task_id, limit_err)
+                    raise ValueError(limit_err)
+
+            if task_id:
+                _check_cancel(task_id, quiet, pbar, tmp_file, f, "[2]")
+
             f.write(chunk)
             downloaded += len(chunk)
+            if task_id:
+                update_progress(task_id, downloaded, total)
             if not quiet:
                 pbar.update(len(chunk))
             if speed is not None:
@@ -376,15 +447,22 @@ def download(
                 elapsed_time = time.time() - t_start
                 if elapsed_time < elapsed_time_expected:
                     time.sleep(elapsed_time_expected - elapsed_time)
+            
+        if task_id:
+            _check_cancel(task_id, quiet, pbar, tmp_file, f, "[3]")
+
         if not quiet:
             pbar.close()
         if tmp_file:
             f.close()
             shutil.move(tmp_file, output)
+            if not from_folder and task_id:
+                complete_progress(task_id)
         if output_is_path and last_modified_time:
             mtime = last_modified_time.timestamp()
             os.utime(output, (mtime, mtime))
     finally:
-        sess.close()
+        if sess:
+            sess.close()
 
     return output

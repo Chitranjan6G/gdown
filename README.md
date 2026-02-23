@@ -1,3 +1,7 @@
+## About This Fork
+
+- This is a fork of the original project with modifications made to meet my specific requirements.
+
 <div align="center">
   <h1>gdown</h1>
   <p><b>Google Drive Public File Downloader when Curl/Wget Fails</b></p>
@@ -76,6 +80,9 @@ $ # write stdout and pipe to extract
 $ gdown https://github.com/wkentaro/gdown/archive/refs/tags/v4.0.0.tar.gz -O - --quiet | tar zxvf -
 $ ls gdown-4.0.0/
 gdown  github2pypi  LICENSE  MANIFEST.in  pyproject.toml  README.md  setup.cfg  setup.py  tests
+
+$ # Limit maximum file size to 10GB
+$ gdown url --max-size 10GB
 ```
 
 ### via Python
@@ -108,6 +115,14 @@ gdown.download_folder(url)
 # same as the above, but with the folder ID
 id = "15uNXeRBIhVvZJIhL4yTw4IsStMhUaaxl"
 gdown.download_folder(id=id)
+
+gdown.download(
+    url,
+    output=output,
+    fuzzy=True,
+    max_size=10 * 1024**3, #10 GB limit
+    task_id=task_id,
+)
 ```
 
 
